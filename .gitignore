@@ -1,5 +1,27 @@
+# Gradle / build output
 .gradle/
 build/
+.kotlin/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Local machine config (SDK path)
 local.properties
+
+# IDEs
 .idea/
 *.iml
+.vscode/
+
+# Built packages — publish these as GitHub Releases instead of committing them
+*.apk
+*.aab
+
+# Signing keys must never be committed
+*.jks
+*.keystore
+
+# OS clutter
+.DS_Store
+Thumbs.db
