@@ -73,7 +73,7 @@ class MainActivity : ComponentActivity() {
     /** Bumped on every resume so permission status rows re-check themselves. */
     var resumeTick by mutableIntStateOf(0)
     /** Home content entrance, 0 → 1. Reset when you come back from an app, then eased in. */
-    val homeEnter = androidx.compose.animation.core.Animatable(1f)
+    var homeEnter by androidx.compose.runtime.mutableFloatStateOf(1f)
     var returnTick by mutableIntStateOf(0)
         private set
 
@@ -105,10 +105,67 @@ class MainActivity : ComponentActivity() {
         refresh()
 
         setContent { LauncherScreen(this) }
+        watchKeyboard()
     }
+
+    // ---------- Keyboard vs. hidden system bars ----------
+
+    /** True while the keyboard is sliding in or out. */
+    private var imeAnimating = false
+    /** When the keyboard was last seen on screen (uptime ms). */
+    private var imeSeenAt = 0L
+
+    /**
+     * Gboard's window is sized around the status bar. If we hide the status bar while the keyboard
+     * is still on screen (e.g. swiping home with the drawer's search open), its window resizes
+     * mid-animation and a light strip of it flashes at the top. So we track the keyboard and only
+     * hide the bars once it has completely gone.
+     */
+    private fun watchKeyboard() {
+        val ime = androidx.core.view.WindowInsetsCompat.Type.ime()
+        androidx.core.view.ViewCompat.setWindowInsetsAnimationCallback(
+            window.decorView,
+            object : androidx.core.view.WindowInsetsAnimationCompat.Callback(DISPATCH_MODE_CONTINUE_ON_SUBTREE) {
+                override fun onPrepare(animation: androidx.core.view.WindowInsetsAnimationCompat) {
+                    if (animation.typeMask and ime != 0) {
+                        imeAnimating = true
+                        imeSeenAt = android.os.SystemClock.uptimeMillis()
+                    }
+                }
+                override fun onProgress(
+                    insets: androidx.core.view.WindowInsetsCompat,
+                    running: MutableList<androidx.core.view.WindowInsetsAnimationCompat>,
+                ) = insets
+                override fun onEnd(animation: androidx.core.view.WindowInsetsAnimationCompat) {
+                    if (animation.typeMask and ime != 0) {
+                        imeAnimating = false
+                        imeSeenAt = android.os.SystemClock.uptimeMillis()
+                        applySystemBars()
+                    }
+                }
+            },
+        )
+    }
+
+    private fun keyboardOnScreen(): Boolean {
+        val up = androidx.core.view.ViewCompat.getRootWindowInsets(window.decorView)
+            ?.isVisible(androidx.core.view.WindowInsetsCompat.Type.ime()) == true
+        val now = android.os.SystemClock.uptimeMillis()
+        if (up) imeSeenAt = now
+        // A short grace period after it's gone: its window can still be animating away.
+        return up || imeAnimating || now - imeSeenAt < 400
+    }
+
+    private val retryBars = Runnable { applySystemBars() }
 
     /** True when Cascade is the phone's chosen home app. */
     fun isDefaultHome(): Boolean = runCatching {
+        if (android.os.Build.VERSION.SDK_INT >= 29) {
+            val roles = getSystemService(android.app.role.RoleManager::class.java)
+            if (roles != null && roles.isRoleAvailable(android.app.role.RoleManager.ROLE_HOME)) {
+                return@runCatching roles.isRoleHeld(android.app.role.RoleManager.ROLE_HOME)
+            }
+        }
         val home = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
         packageManager.resolveActivity(home, android.content.pm.PackageManager.MATCH_DEFAULT_ONLY)
             ?.activityInfo?.packageName == packageName
@@ -119,20 +176,30 @@ class MainActivity : ComponentActivity() {
         // When another launcher is the default, don't linger as a second home screen in the
         // background: the system's swipe-home animation targets the real default launcher, and
         // a leftover Cascade home task sitting on top of it leaves the app card frozen on screen.
-        if (!isChangingConfigurations && !isDefaultHome()) finishAndRemoveTask()
+        // Never while the screen is off or locked: that is the launcher simply going to sleep,
+        // and finishing then would leave the phone with no home screen when it wakes up.
+        val power = getSystemService(android.os.PowerManager::class.java)
+        val keyguard = getSystemService(android.app.KeyguardManager::class.java)
+        val asleep = power?.isInteractive == false || keyguard?.isKeyguardLocked == true
+        if (!isChangingConfigurations && !asleep && !isDefaultHome()) finishAndRemoveTask()
     }
 
     override fun onRestart() {
         super.onRestart()
         // Set synchronously (no coroutine) so the very first frame back is already the start
         // of the entrance, then the home screen animates it in while the app slides away.
-        kotlinx.coroutines.runBlocking { homeEnter.snapTo(0f) }
+        // A plain state write: never block the main thread here. (The old runBlocking +
+        // Animatable could wait forever on an entrance animation that was paused while the
+        // screen was off, freezing the launcher on a black screen.)
+        homeEnter = 0f
         returnTick++
     }
 
     override fun onResume() {
         super.onResume()
         resumeTick++
+        // Safety net: the home content must always end up fully visible.
+        window.decorView.postDelayed({ if (homeEnter < 1f) homeEnter = 1f }, 900)
         applySystemBars()
         // Let the island pick up permission changes made in system settings.
         NowPlaying.service?.refresh()
@@ -154,11 +221,34 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         if (Intent.ACTION_MAIN == intent.action) {
-            drawerOpen = false
+            closeDrawerAfterKeyboard()
             settingsOpen = false
             stopEditing()
             darkenEditing = false
             islandSizeStage = null
+        }
+    }
+
+    /**
+     * Swiping home with the drawer's keyboard up: lower the keyboard first and only then close
+     * the drawer. Doing both in the same instant makes the system flash a white bar at the top.
+     */
+    private fun closeDrawerAfterKeyboard() {
+        if (!drawerOpen) return
+        val root = window.decorView
+        val ime = androidx.core.view.WindowInsetsCompat.Type.ime()
+        fun imeUp() = androidx.core.view.ViewCompat.getRootWindowInsets(root)?.isVisible(ime) == true
+        if (!imeUp()) {
+            drawerOpen = false
+            return
+        }
+        currentFocus?.clearFocus()
+        androidx.core.view.WindowCompat.getInsetsController(window, root).hide(ime)
+        lifecycleScope.launch {
+            kotlinx.coroutines.withTimeoutOrNull(500) {
+                while (imeUp()) kotlinx.coroutines.delay(16)
+            }
+            drawerOpen = false
         }
     }
 
@@ -277,6 +367,13 @@ class MainActivity : ComponentActivity() {
         val nav = androidx.core.view.WindowInsetsCompat.Type.navigationBars()
         // Hidden only on the home screen itself: the drawer and settings bring them back.
         val onHome = !settingsOpen && !drawerOpen
+        val wantHide = onHome && (settings.hideStatusBar || settings.hideNavBar)
+        if (wantHide && keyboardOnScreen()) {
+            // Leave the bars as they are until the keyboard has fully gone, then try again.
+            window.decorView.removeCallbacks(retryBars)
+            window.decorView.postDelayed(retryBars, 120)
+            return
+        }
         if (settings.hideStatusBar && onHome) controller.hide(status) else controller.show(status)
         if (settings.hideNavBar && onHome) controller.hide(nav) else controller.show(nav)
     }

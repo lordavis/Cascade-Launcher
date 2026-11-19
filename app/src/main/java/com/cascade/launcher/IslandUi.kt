@@ -69,6 +69,7 @@ import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontFamily
@@ -78,6 +79,30 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
+import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.positionChange
+import kotlin.math.abs
+
+/** Island-wide options that every stage reads. */
+data class IslandMode(
+    /** Swipe left/right to skip, double-tap to play/pause. */
+    val swipe: Boolean = false,
+    /** Hide the control buttons (only when [swipe] is on, so you can still control music). */
+    val hideButtons: Boolean = false,
+) {
+    val showButtons: Boolean get() = !(swipe && hideButtons)
+}
+
+val LocalIslandMode = staticCompositionLocalOf { IslandMode() }
+
+/** Lets the seek bar tell the island's swipe detector to stay out of a drag. */
+class SwipeGate { var blocked = false }
+private val LocalSwipeGate = staticCompositionLocalOf { SwipeGate() }
+
+/** The island's surface colour (black, tinted or see-through glass), for contrast decisions. */
+private val LocalIslandSurface = staticCompositionLocalOf { Color.Black }
 
 /** Sample island used while positioning it with no music playing. */
 val PreviewMedia = MediaInfo(
@@ -122,6 +147,8 @@ fun HomeIsland(
     font: FontFamily,
     autoShrink: Boolean,
     onStageChange: (IslandStage) -> Unit,
+    look: IslandLook = IslandLook.BLACK,
+    mode: IslandMode = IslandMode(),
     onOpenPlayer: () -> Unit,
 ) {
     val accent = LocalAccent.current
@@ -151,10 +178,47 @@ fun HomeIsland(
         label = "border",
     )
 
+    // Island surface: solid black, a near-black tint of the song's colour, or see-through glass.
+    val songColor = info.artColors.firstOrNull()?.let { Color(it) } ?: palette.first()
+    val surface by androidx.compose.animation.animateColorAsState(
+        when (look) {
+            IslandLook.BLACK -> Color.Black
+            IslandLook.TINTED -> lerp(Color.Black, songColor, 0.17f)
+            IslandLook.GLASS -> Color.Black.copy(alpha = 0.42f)
+        },
+        tween(600),
+        label = "surface",
+    )
+
+    val gate = remember { SwipeGate() }
     Box(
         Modifier
             .clip(RoundedCornerShape(corner))
-            .background(Color.Black)
+            .background(surface)
+            // Swipe left = next song, swipe right = previous (when turned on).
+            .then(
+                if (mode.swipe) Modifier.pointerInput(Unit) {
+                    islandSwipes(gate) { forward ->
+                        touchedAt = SystemClock.elapsedRealtime()
+                        if (forward) NowPlaying.next() else NowPlaying.previous()
+                    }
+                } else Modifier,
+            )
+            .then(
+                if (look == IslandLook.GLASS) Modifier.drawWithContent {
+                    drawContent()
+                    // Hairline light rim, like the edge of a glass pane.
+                    val rim = 1.dp.toPx()
+                    val r = (corner.toPx() - rim / 2).coerceAtLeast(0f)
+                    drawRoundRect(
+                        brush = Brush.verticalGradient(listOf(Color.White.copy(alpha = 0.32f), Color.White.copy(alpha = 0.08f))),
+                        topLeft = Offset(rim / 2, rim / 2),
+                        size = Size(size.width - rim, size.height - rim),
+                        cornerRadius = CornerRadius(r, r),
+                        style = Stroke(width = rim),
+                    )
+                } else Modifier,
+            )
             // Black border drawn ON TOP of the content and entirely INSIDE the shape's edge,
             // so the island keeps exactly the same size with or without it.
             .drawWithContent {
@@ -172,6 +236,7 @@ fun HomeIsland(
                 }
             },
     ) {
+      CompositionLocalProvider(LocalIslandMode provides mode, LocalSwipeGate provides gate, LocalIslandSurface provides surface) {
         AnimatedContent(
             targetState = stage,
             transitionSpec = {
@@ -197,8 +262,47 @@ fun HomeIsland(
                 }
             }
         }
+      }
     }
 }
+
+/**
+ * Horizontal swipe detector for the island. It looks at touches before the island's buttons do,
+ * and only takes over (cancelling their tap) once the finger has clearly moved sideways.
+ */
+private suspend fun androidx.compose.ui.input.pointer.PointerInputScope.islandSwipes(
+    gate: SwipeGate,
+    onSwipe: (forward: Boolean) -> Unit,
+) {
+    val trigger = 36.dp.toPx()
+    awaitEachGesture {
+        val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+        gate.blocked = false
+        var dx = 0f
+        var dy = 0f
+        var dragging = false
+        while (true) {
+            val e = awaitPointerEvent(PointerEventPass.Initial)
+            val c = e.changes.firstOrNull { it.id == down.id } ?: break
+            if (gate.blocked) break                     // the seek bar has this drag
+            if (!c.pressed) {
+                if (dragging) c.consume()
+                break
+            }
+            val d = c.positionChange()
+            dx += d.x
+            dy += d.y
+            if (!dragging && abs(dx) > viewConfiguration.touchSlop && abs(dx) > abs(dy) * 1.4f) dragging = true
+            if (dragging) c.consume()
+        }
+        if (dragging && abs(dx) > trigger) onSwipe(dx < 0)
+    }
+}
+
+/** Double-tap = play/pause, when swipe controls are on (otherwise no double-tap delay). */
+@Composable
+private fun doubleTapPlayPause(onInteract: () -> Unit = {}): ((Offset) -> Unit)? =
+    if (LocalIslandMode.current.swipe) { _ -> onInteract(); NowPlaying.playPause() } else null
 
 private fun glowBrush(palette: List<Color>, vertical: Boolean = false): Brush {
     val colors = (if (palette.size > 1) palette else palette + palette).map { it.copy(alpha = 0.32f) }
@@ -219,12 +323,14 @@ private fun MiniIsland(
     val ring = MiniFeature.RING in features
     val pos = rememberPositionMs(info, ring)
     val fraction = if (info.durationMs > 0) (pos.toFloat() / info.durationMs).coerceIn(0f, 1f) else 0f
+    val mode = LocalIslandMode.current
+    val dbl = doubleTapPlayPause()
     Row(
         Modifier
             .widthIn(min = size.width)
             .height(h)
             .then(if (MiniFeature.GLOW in features) Modifier.background(glowBrush(palette)) else Modifier)
-            .pointerInput(Unit) { detectTapGestures(onTap = { onTap() }, onLongPress = { onLongPress() }) }
+            .pointerInput(mode.swipe) { detectTapGestures(onTap = { onTap() }, onDoubleTap = dbl, onLongPress = { onLongPress() }) }
             .padding(horizontal = (h.value * 0.2f).dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -236,7 +342,7 @@ private fun MiniIsland(
             ring = ring,
             fraction = fraction,
         )
-        if (MiniFeature.PLAY_BUTTON in features) {
+        if (MiniFeature.PLAY_BUTTON in features && mode.showButtons) {
             Spacer(Modifier.width((6 * k).dp))
             ControlButton(size = (h.value * 0.8f).coerceAtLeast(24f).dp, onClick = { NowPlaying.playPause() }) {
                 if (info.playing) PauseIcon((14 * k).dp) else PlayIcon((14 * k).dp)
@@ -248,6 +354,7 @@ private fun MiniIsland(
             Visualizer(
                 info.playing, palette, bars = if (wide) 9 else 5,
                 modifier = Modifier.size(width = ((if (wide) 46 else 26) * k).dp, height = (17 * k).dp),
+                dots = MiniFeature.DOTS in features,
             )
         }
     }
@@ -365,6 +472,9 @@ private fun PillIsland(
     val dur = info.durationMs
     val glow = if (palette.size > 1) palette else palette + palette
     val buttonSize = (minOf(h.value, 40f * k) * 0.82f).coerceAtLeast(24f).dp
+    val mode = LocalIslandMode.current
+    val dbl = doubleTapPlayPause(onInteract)
+    val bmp = remember(info.art) { info.art?.asImageBitmap() }
 
     Box(
         Modifier
@@ -379,8 +489,19 @@ private fun PillIsland(
                     else -> Modifier
                 },
             )
-            .pointerInput(Unit) { detectTapGestures(onTap = { onTap() }, onLongPress = { onLongPress() }) },
+            .pointerInput(mode.swipe) { detectTapGestures(onTap = { onTap() }, onDoubleTap = dbl, onLongPress = { onLongPress() }) },
     ) {
+        // Cover wash: the album art, heavily blurred and darkened, fills the pill.
+        if (style.wash && bmp != null) {
+            Image(
+                bmp, contentDescription = null, contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    .matchParentSize()
+                    .then(if (Build.VERSION.SDK_INT >= 31) Modifier.blur(18.dp) else Modifier)
+                    .graphicsLayer { alpha = if (Build.VERSION.SDK_INT >= 31) 0.75f else 0.4f },
+            )
+            Box(Modifier.matchParentSize().background(Color.Black.copy(alpha = 0.42f)))
+        }
         Row(
             Modifier
                 .then(if (style.fit) Modifier else Modifier.fillMaxWidth())
@@ -432,26 +553,29 @@ private fun PillIsland(
             }
 
             // 1) Previous / play-pause / next (taps here never expand the island).
-            if (style.skip) {
-                ControlButton(size = buttonSize, onClick = { onInteract(); NowPlaying.previous() }) { PrevIcon((12 * k).dp) }
-            }
-            ControlButton(size = buttonSize, onClick = { onInteract(); NowPlaying.playPause() }) {
-                if (info.playing) PauseIcon((15 * k).dp) else PlayIcon((15 * k).dp)
-            }
-            if (style.skip) {
-                ControlButton(size = buttonSize, onClick = { onInteract(); NowPlaying.next() }) { NextIcon((12 * k).dp) }
+            if (mode.showButtons) {
+                if (style.skip) {
+                    ControlButton(size = buttonSize, onClick = { onInteract(); NowPlaying.previous() }) { PrevIcon((12 * k).dp) }
+                }
+                ControlButton(size = buttonSize, onClick = { onInteract(); NowPlaying.playPause() }) {
+                    if (info.playing) PauseIcon((15 * k).dp) else PlayIcon((15 * k).dp)
+                }
+                if (style.skip) {
+                    ControlButton(size = buttonSize, onClick = { onInteract(); NowPlaying.next() }) { NextIcon((12 * k).dp) }
+                }
             }
             Spacer(Modifier.width((4 * k).dp))
 
-            // 5) Wide waveform-style visualizer, or the normal small one.
+            // 5) Wide visualizer, or the normal small one.
             if (style.wideViz) {
                 Visualizer(
                     info.playing, palette, bars = 14,
                     modifier = if (style.fit) Modifier.size(width = (72 * k).dp, height = (18 * k).dp)
                     else Modifier.weight(0.8f).height((18 * k).dp),
+                    dots = style.dots,
                 )
             } else {
-                Visualizer(info.playing, palette, bars = 5, modifier = Modifier.size(width = (28 * k).dp, height = (18 * k).dp))
+                Visualizer(info.playing, palette, bars = 5, modifier = Modifier.size(width = (28 * k).dp, height = (18 * k).dp), dots = style.dots)
             }
             Spacer(Modifier.width(4.dp))
         }
@@ -488,6 +612,33 @@ private fun ExpandedIsland(
     val k = size.scale
     val poster = ExpFeature.POSTER in f
     val bmp = remember(info.art) { info.art?.asImageBitmap() }
+    val mode = LocalIslandMode.current
+    val dots = ExpFeature.DOTS in f
+    val dbl = doubleTapPlayPause(onInteract)
+    // With the cover as background, work out what colour the card really is behind the text and
+    // pick text colours that stand out from it (bright covers get a deeper shade and dark text if
+    // needed; accent text is lightened or darkened until it reads clearly).
+    val artBg = ExpFeature.ART_BACKGROUND in f && bmp != null
+    val artAvg = remember(info.art, info.artColors) { averageArtColor(info) }
+    val contrastOn = ExpFeature.CONTRAST in f
+    // Contrast also deepens the shade over bright covers; otherwise the cover keeps its usual shade.
+    val shade = if (artBg) (if (contrastOn) 0.45f + 0.2f * artAvg.luminance() else 0.45f) else 0f
+    val cardBg = estimateCardBackground(LocalIslandSurface.current, if (artBg) artAvg else null, shade)
+    val accentText = ExpFeature.ACCENT_TEXT in f
+    // Contrast: every text colour is checked against what's really behind it (the cover, when
+    // it's the background) and made light or dark enough to read. With Accent text too, the
+    // accent keeps its hue and only gets lighter or darker as needed.
+    val autoText = contrastOn
+    val textColor = rememberCardTextColor(info, palette, accentText, if (autoText) cardBg else null)
+    val appColor = when {
+        accentText -> textColor.copy(alpha = 0.8f)
+        autoText -> readableOn(palette.first(), cardBg)
+        else -> null
+    }
+    val subAlpha = if (autoText) 0.8f else 0.6f
+    val shadow = if (autoText) androidx.compose.ui.graphics.Shadow(
+        (if (cardBg.luminance() > 0.45f) Color.White else Color.Black).copy(alpha = 0.5f), Offset(0f, 1f), 6f,
+    ) else null
 
     Box(
         Modifier
@@ -503,15 +654,17 @@ private fun ExpandedIsland(
                     .then(if (Build.VERSION.SDK_INT >= 31) Modifier.blur(26.dp) else Modifier)
                     .graphicsLayer { alpha = 0.6f },
             )
-            Box(Modifier.matchParentSize().background(Color.Black.copy(alpha = 0.45f)))
+            Box(Modifier.matchParentSize().background(Color.Black.copy(alpha = shade)))
         }
         if (ExpFeature.GLOW in f) Box(Modifier.matchParentSize().background(glowBrush(palette, vertical = true)))
 
-        Column(
+        if (ExpFeature.MINIMAL in f) {
+            MinimalCard(info, palette, size, f, font, onOpenPlayer, onInteract)
+        } else Column(
             Modifier
                 .fillMaxWidth()
                 .then(if (size.height != null) Modifier.fillMaxHeight() else Modifier)
-                .pointerInput(Unit) { detectTapGestures(onTap = { onOpenPlayer() }) }
+                .pointerInput(mode.swipe) { detectTapGestures(onTap = { onOpenPlayer() }, onDoubleTap = dbl) }
                 .padding(start = (16 * k).dp, end = (16 * k).dp, top = (16 * k).dp, bottom = (10 * k).dp),
             verticalArrangement = Arrangement.SpaceBetween,
         ) {
@@ -521,22 +674,21 @@ private fun ExpandedIsland(
                     AlbumArt(info, (128 * k).dp, RoundedCornerShape((20 * k).dp))
                     Spacer(Modifier.height((12 * k).dp))
                     Text(
-                        info.title, color = Color.White, fontSize = (17 * k).sp, fontFamily = font,
+                        info.title, color = textColor, fontSize = (17 * k).sp, fontFamily = font,
+                        style = androidx.compose.ui.text.TextStyle(shadow = shadow),
                         fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis,
                     )
                     Text(
-                        info.artist, color = Color.White.copy(alpha = 0.6f), fontSize = (14 * k).sp, fontFamily = font,
+                        info.artist, color = textColor.copy(alpha = subAlpha), fontSize = (14 * k).sp, fontFamily = font,
+                        style = androidx.compose.ui.text.TextStyle(shadow = shadow),
                         maxLines = 1, overflow = TextOverflow.Ellipsis,
                     )
                     if (ExpFeature.APP_NAME in f) {
-                        Text(
-                            info.appLabel, color = palette.first().copy(alpha = 0.95f), fontSize = (11 * k).sp,
-                            fontFamily = font, fontWeight = FontWeight.Medium, maxLines = 1,
-                        )
+                        AppLabel(info, palette, k, font, appColor)
                     }
-                    if (ExpFeature.VISUALIZER in f) {
+                    if (ExpFeature.VISUALIZER in f || dots) {
                         Spacer(Modifier.height((8 * k).dp))
-                        Visualizer(info.playing, palette, bars = 7, modifier = Modifier.size(width = (42 * k).dp, height = (22 * k).dp))
+                        Visualizer(info.playing, palette, bars = 7, modifier = Modifier.size(width = (42 * k).dp, height = (22 * k).dp), dots = dots)
                     }
                 }
             } else {
@@ -545,22 +697,20 @@ private fun ExpandedIsland(
                     Spacer(Modifier.width((14 * k).dp))
                     Column(Modifier.weight(1f)) {
                         Text(
-                            info.title, color = Color.White, fontSize = (16 * k).sp, fontFamily = font,
-                            fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            info.title, color = textColor, fontSize = (16 * k).sp, fontFamily = font,
+                            style = androidx.compose.ui.text.TextStyle(shadow = shadow), fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis,
                         )
                         Text(
-                            info.artist, color = Color.White.copy(alpha = 0.6f), fontSize = (14 * k).sp, fontFamily = font,
+                            info.artist, color = textColor.copy(alpha = subAlpha), fontSize = (14 * k).sp, fontFamily = font,
+                        style = androidx.compose.ui.text.TextStyle(shadow = shadow),
                             maxLines = 1, overflow = TextOverflow.Ellipsis,
                         )
                         if (ExpFeature.APP_NAME in f) {
-                            Text(
-                                info.appLabel, color = palette.first().copy(alpha = 0.95f), fontSize = (11 * k).sp,
-                                fontFamily = font, fontWeight = FontWeight.Medium, maxLines = 1,
-                            )
+                            AppLabel(info, palette, k, font, appColor)
                         }
                     }
-                    if (ExpFeature.VISUALIZER in f) {
-                        Visualizer(info.playing, palette, bars = 7, modifier = Modifier.size(width = (42 * k).dp, height = (28 * k).dp))
+                    if (ExpFeature.VISUALIZER in f || dots) {
+                        Visualizer(info.playing, palette, bars = 7, modifier = Modifier.size(width = (42 * k).dp, height = (28 * k).dp), dots = dots)
                     }
                 }
             }
@@ -568,11 +718,11 @@ private fun ExpandedIsland(
             Column {
                 if (ExpFeature.WIDE_VIZ in f) {
                     Spacer(Modifier.height((12 * k).dp))
-                    Visualizer(info.playing, palette, bars = 24, modifier = Modifier.fillMaxWidth().height((30 * k).dp))
+                    Visualizer(info.playing, palette, bars = 24, modifier = Modifier.fillMaxWidth().height((30 * k).dp), dots = dots)
                 }
                 Spacer(Modifier.height((14 * k).dp))
                 Progress(info, palette, showTimes = ExpFeature.TIMES in f, seekable = ExpFeature.SEEK in f, onInteract = onInteract, font = font)
-                Row(
+                if (mode.showButtons) Row(
                     Modifier
                         .fillMaxWidth()
                         .padding(top = 4.dp),
@@ -580,14 +730,24 @@ private fun ExpandedIsland(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     ControlButton(size = (46 * k).dp, onClick = { onInteract(); NowPlaying.previous() }) { PrevIcon((22 * k).dp) }
-                    ControlButton(size = (56 * k).dp, onClick = { onInteract(); NowPlaying.playPause() }) {
-                        if (info.playing) PauseIcon((26 * k).dp) else PlayIcon((26 * k).dp)
-                    }
+                    PlayPauseButton(
+                        info, (56 * k).dp, (26 * k).dp,
+                        fill = if (ExpFeature.ACCENT_PLAY in f) songAccent(info, palette) else null,
+                    ) { onInteract(); NowPlaying.playPause() }
                     ControlButton(size = (46 * k).dp, onClick = { onInteract(); NowPlaying.next() }) { NextIcon((22 * k).dp) }
-                }
+                } else Spacer(Modifier.height((6 * k).dp))
             }
         }
     }
+}
+
+/** The music app's name, in the song's colour. */
+@Composable
+private fun AppLabel(info: MediaInfo, palette: List<Color>, k: Float, font: FontFamily, color: Color? = null) {
+    Text(
+        info.appLabel, color = color ?: palette.first().copy(alpha = 0.95f), fontSize = (11 * k).sp,
+        fontFamily = font, fontWeight = FontWeight.Medium, maxLines = 1,
+    )
 }
 
 // ------------------------------------------------------------------ visualizer colors
@@ -607,6 +767,36 @@ fun visualizerPalette(style: VisualizerStyle, artColors: List<Int>, accent: Colo
 
 private fun hexes(vararg rgb: Int) = rgb.map { Color(0xFF000000.toInt() or it) }
 
+/** Little LED-meter simulation behind the dot-matrix visualizer. */
+private class DotEq(val bars: Int) {
+    val level = FloatArray(bars) { 0.3f }
+    val peak = FloatArray(bars) { 0.3f }
+    private val target = FloatArray(bars) { 0.3f }
+    private val next = LongArray(bars)
+    private var beatAt = 0L
+    private val rnd = java.util.Random()
+
+    fun step(now: Long, dt: Float) {
+        // A soft "kick" roughly every 0.45 s lifts every column together, so it pulses like music.
+        val beat = now >= beatAt
+        if (beat) beatAt = now + 400_000_000L + rnd.nextInt(120_000_000)
+        for (i in 0 until bars) {
+            if (beat || now >= next[i]) {
+                val v = rnd.nextFloat()
+                target[i] = if (beat) 0.55f + 0.45f * v else 0.05f + 0.75f * v * v
+                next[i] = now + 70_000_000L + rnd.nextInt(110_000_000)
+            }
+            // Fast attack up to the target, then fall under gravity.
+            if (target[i] > level[i]) {
+                level[i] += (target[i] - level[i]) * (1f - kotlin.math.exp(-dt * 38f))
+            } else {
+                level[i] = (level[i] - dt * 3.4f).coerceAtLeast(target[i])
+            }
+            if (level[i] >= peak[i]) peak[i] = level[i] else peak[i] = (peak[i] - dt * 1.1f).coerceAtLeast(level[i])
+        }
+    }
+}
+
 private val PausedHeights = floatArrayOf(0.35f, 0.6f, 0.45f, 0.75f, 0.4f, 0.55f, 0.3f)
 
 /** Smoothly sample a looping palette at position [t] (any float; wraps around). */
@@ -622,7 +812,7 @@ private fun sample(palette: List<Color>, t: Float): Color {
  * chosen palette, so the island never looks the same twice.
  */
 @Composable
-fun Visualizer(playing: Boolean, palette: List<Color>, bars: Int, modifier: Modifier) {
+fun Visualizer(playing: Boolean, palette: List<Color>, bars: Int, modifier: Modifier, dots: Boolean = false) {
     val transition = rememberInfiniteTransition(label = "viz")
     val heights = (0 until bars).map { i ->
         transition.animateFloat(
@@ -642,7 +832,59 @@ fun Visualizer(playing: Boolean, palette: List<Color>, bars: Int, modifier: Modi
         label = "phase",
     )
 
+    // Dot matrix runs its own equaliser: every column jumps to a new level many times a second
+    // (fast attack), then drops back under "gravity", with a peak dot that hangs and falls
+    // slowly — the snappy feel of a hardware LED meter rather than a slow sine wave.
+    val eq = remember(bars) { DotEq(bars) }
+    var eqFrame by remember { mutableLongStateOf(0L) }
+    LaunchedEffect(dots, playing, bars) {
+        if (!dots || !playing) return@LaunchedEffect
+        var last = 0L
+        while (true) {
+            withFrameNanos { t ->
+                if (last != 0L) eq.step(t, ((t - last) / 1_000_000_000f).coerceAtMost(0.05f))
+                last = t
+                eqFrame = t
+            }
+        }
+    }
+
     Canvas(modifier) {
+        if (dots) {
+            eqFrame // redraw every frame while it runs
+            // Dot matrix: each column is the same smooth bar as the normal visualizer, just drawn
+            // as dots. The bar's continuous height decides how far out the dots reach; the outer
+            // dots fade and grow in gradually instead of popping on and off, so it moves as
+            // smoothly as the bars do. Same colours, top to bottom.
+            val pitch = size.width / bars
+            val vPitch = pitch * 0.78f
+            var rows = (size.height / vPitch).toInt().coerceAtLeast(3)
+            if (rows % 2 == 0) rows -= 1
+            val maxHalf = rows / 2
+            val r = pitch * 0.3f
+            val mid = size.height / 2
+            for (i in 0 until bars) {
+                val f = if (playing) eq.level[i] else PausedHeights[i % PausedHeights.size]
+                val reach = f * (maxHalf + 0.5f)
+                val lit = (reach + 0.05f).toInt().coerceIn(0, maxHalf)   // crisp, LED-like steps
+                val peak = if (playing) (eq.peak[i] * (maxHalf + 0.5f) + 0.05f).toInt().coerceIn(0, maxHalf) else 0
+                val cx = pitch * i + pitch / 2
+                val pos = i.toFloat() / bars * 0.6f + (if (playing) phase else 0f)
+                val top = sample(palette, pos)
+                val bottom = sample(palette, pos + 0.18f)
+                val a = if (playing) 1f else 0.75f
+                for (k in -maxHalf..maxHalf) {
+                    val d = abs(k)
+                    val t = (k + maxHalf) / (2f * maxHalf)
+                    val c = lerp(top, bottom, t)
+                    when {
+                        d <= lit -> drawCircle(c.copy(alpha = a), r, Offset(cx, mid + k * vPitch))
+                        d == peak -> drawCircle(c.copy(alpha = 0.55f), r * 0.85f, Offset(cx, mid + k * vPitch))
+                    }
+                }
+            }
+            return@Canvas
+        }
         val barW = size.width / (bars * 2 - 1)
         for (i in 0 until bars) {
             // Paused: frozen bars (a fixed little skyline) with frozen colors.
@@ -698,9 +940,11 @@ private fun Progress(
     val shown = dragFraction ?: fraction
     val brush = if (palette.size > 1) Brush.horizontalGradient(palette) else Brush.horizontalGradient(listOf(palette[0], palette[0]))
     val shownPos = if (dur > 0) (shown * dur).toLong() else pos
+    val gate = LocalSwipeGate.current
+    val timeColor = Color.White.copy(alpha = 0.55f)
 
     Row(verticalAlignment = Alignment.CenterVertically) {
-        if (showTimes) Text(fmt(shownPos), color = Color.White.copy(alpha = 0.55f), fontSize = 11.sp, fontFamily = font)
+        if (showTimes) Text(fmt(shownPos), color = timeColor, fontSize = 11.sp, fontFamily = font)
         Canvas(
             Modifier
                 .weight(1f)
@@ -711,6 +955,7 @@ private fun Progress(
                         awaitEachGesture {
                             val down = awaitFirstDown()
                             down.consume()
+                            gate.blocked = true          // keep the island's swipe-to-skip out of it
                             var f = (down.position.x / this.size.width).coerceIn(0f, 1f)
                             dragFraction = f
                             while (true) {
@@ -736,7 +981,7 @@ private fun Progress(
             if (seekable) drawCircle(Color.White, radius = if (dragFraction != null) 8.dp.toPx() else 5.dp.toPx(), center = Offset(w * shown, this.size.height / 2))
         }
         if (showTimes) {
-            Text(if (dur > 0) "-" + fmt(dur - shownPos) else "", color = Color.White.copy(alpha = 0.55f), fontSize = 11.sp, fontFamily = font)
+            Text(if (dur > 0) "-" + fmt(dur - shownPos) else "", color = timeColor, fontSize = 11.sp, fontFamily = font)
         }
     }
 }
@@ -758,22 +1003,22 @@ private fun ControlButton(size: Dp = 46.dp, onClick: () -> Unit, content: @Compo
 }
 
 @Composable
-private fun PlayIcon(dim: Dp = 26.dp) = Canvas(Modifier.size(dim)) {
+private fun PlayIcon(dim: Dp = 26.dp, tint: Color = Color.White) = Canvas(Modifier.size(dim)) {
     val p = Path().apply {
         moveTo(size.width * 0.22f, size.height * 0.12f)
         lineTo(size.width * 0.9f, size.height * 0.5f)
         lineTo(size.width * 0.22f, size.height * 0.88f)
         close()
     }
-    drawPath(p, Color.White)
+    drawPath(p, tint)
 }
 
 @Composable
-private fun PauseIcon(dim: Dp = 26.dp) = Canvas(Modifier.size(dim)) {
+private fun PauseIcon(dim: Dp = 26.dp, tint: Color = Color.White) = Canvas(Modifier.size(dim)) {
     val w = size.width * 0.26f
     val r = CornerRadius(w / 3)
-    drawRoundRect(Color.White, Offset(size.width * 0.16f, size.height * 0.12f), Size(w, size.height * 0.76f), r)
-    drawRoundRect(Color.White, Offset(size.width * 0.58f, size.height * 0.12f), Size(w, size.height * 0.76f), r)
+    drawRoundRect(tint, Offset(size.width * 0.16f, size.height * 0.12f), Size(w, size.height * 0.76f), r)
+    drawRoundRect(tint, Offset(size.width * 0.58f, size.height * 0.12f), Size(w, size.height * 0.76f), r)
 }
 
 @Composable
@@ -795,6 +1040,175 @@ private fun DrawScope.drawSkip(forward: Boolean) {
     drawPath(tri, Color.White)
     val barX = if (forward) w * 0.76f else w * (1f - 0.76f - 0.14f)
     drawRoundRect(Color.White, Offset(barX, h * 0.12f), Size(w * 0.14f, h * 0.76f), CornerRadius(w * 0.05f))
+}
+
+/** Title/artist/app colour on the Large card: white, or the play button's song accent. */
+@Composable
+private fun rememberCardTextColor(
+    info: MediaInfo,
+    palette: List<Color>,
+    accent: Boolean,
+    /** When set (Contrast), the text becomes whichever of white or near-black reads best on it. */
+    autoOn: Color? = null,
+): Color {
+    val target = when {
+        accent && autoOn != null -> readableOn(songAccent(info, palette), autoOn)
+        accent -> songAccent(info, palette)
+        autoOn != null -> {
+            val dark = Color(0xFF111111)
+            if (contrast(Color.White, autoOn) >= contrast(dark, autoOn)) Color.White else dark
+        }
+        else -> Color.White
+    }
+    val c by androidx.compose.animation.animateColorAsState(target, tween(500), label = "cardText")
+    return c
+}
+
+/** WCAG contrast ratio between two opaque colours (1 = none, 21 = black on white). */
+private fun contrast(a: Color, b: Color): Float {
+    val la = a.luminance()
+    val lb = b.luminance()
+    return (maxOf(la, lb) + 0.05f) / (minOf(la, lb) + 0.05f)
+}
+
+/** [c], lightened (on dark) or darkened (on light) just enough to read clearly on [bg]. */
+private fun readableOn(c: Color, bg: Color, min: Float = 4.5f): Color {
+    if (contrast(c, bg) >= min) return c
+    val toward = if (bg.luminance() < 0.4f) Color.White else Color.Black
+    var t = 0f
+    var r = c
+    while (contrast(r, bg) < min && t < 1f) {
+        t += 0.08f
+        r = lerp(c, toward, t.coerceAtMost(1f))
+    }
+    return r
+}
+
+/** Average colour of the album cover (tiny downscale), or its palette as a fallback. */
+private fun averageArtColor(info: MediaInfo): Color {
+    val fromBitmap = runCatching {
+        val src = info.art ?: return@runCatching null
+        val soft = if (Build.VERSION.SDK_INT >= 26 && src.config == android.graphics.Bitmap.Config.HARDWARE) {
+            src.copy(android.graphics.Bitmap.Config.ARGB_8888, false)
+        } else src
+        val tiny = android.graphics.Bitmap.createScaledBitmap(soft, 8, 8, true)
+        var r = 0f; var g = 0f; var b = 0f
+        for (y in 0 until 8) for (x in 0 until 8) {
+            val p = tiny.getPixel(x, y)
+            r += android.graphics.Color.red(p); g += android.graphics.Color.green(p); b += android.graphics.Color.blue(p)
+        }
+        Color(r / 64f / 255f, g / 64f / 255f, b / 64f / 255f)
+    }.getOrNull()
+    return fromBitmap ?: info.artColors.firstOrNull()?.let { Color(it) } ?: Color(0xFF333333)
+}
+
+/**
+ * Roughly what colour the Large card is behind its text: the island surface (glass lets an
+ * average wallpaper through), then the blurred cover at 60%, then the dark shade on top.
+ */
+private fun estimateCardBackground(surface: Color, art: Color?, shade: Float): Color {
+    var bg = surface.copy(alpha = 1f).let { s -> lerp(Color(0xFF3A3A3A), s, surface.alpha) }
+    if (art != null) bg = lerp(bg, art, 0.6f)
+    return lerp(bg, Color.Black, shade)
+}
+
+/** The song's main colour, made bright enough to read as a solid button. */
+private fun songAccent(info: MediaInfo, palette: List<Color>): Color {
+    val c = info.artColors.firstOrNull()?.let { Color(it) } ?: palette.first()
+    return lerp(c, Color.White, 0.08f)
+}
+
+/** Play/pause; with [fill] it becomes a solid colour disc with a dark icon (the one pop of colour). */
+@Composable
+private fun PlayPauseButton(info: MediaInfo, size: Dp, icon: Dp, fill: Color?, onClick: () -> Unit) {
+    val bg by androidx.compose.animation.animateColorAsState(fill ?: Color.Transparent, tween(500), label = "playFill")
+    Box(
+        Modifier
+            .size(size)
+            .clip(CircleShape)
+            .background(bg)
+            .pointerInput(onClick) { detectTapGestures(onTap = { onClick() }) },
+        contentAlignment = Alignment.Center,
+    ) {
+        val tint = if (fill != null) Color(0xFF111111) else Color.White
+        if (info.playing) PauseIcon(icon, tint) else PlayIcon(icon, tint)
+    }
+}
+
+/**
+ * Large stage, minimal: cover + title/artist, one thin white progress line, and three widely
+ * spaced controls. No backgrounds or extra colour except an optional accent play button.
+ */
+@Composable
+private fun MinimalCard(
+    info: MediaInfo,
+    palette: List<Color>,
+    size: StageSize,
+    f: Set<ExpFeature>,
+    font: FontFamily,
+    onOpenPlayer: () -> Unit,
+    onInteract: () -> Unit,
+) {
+    val k = size.scale
+    val showButtons = LocalIslandMode.current.showButtons
+    val dbl = doubleTapPlayPause(onInteract)
+    val textColor = rememberCardTextColor(info, palette, ExpFeature.ACCENT_TEXT in f)
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .then(if (size.height != null) Modifier.fillMaxHeight() else Modifier)
+            .pointerInput(LocalIslandMode.current.swipe) { detectTapGestures(onTap = { onOpenPlayer() }, onDoubleTap = dbl) }
+            .padding(start = (18 * k).dp, end = (18 * k).dp, top = (18 * k).dp, bottom = (12 * k).dp),
+        verticalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            AlbumArt(info, (60 * k).dp, RoundedCornerShape((14 * k).dp))
+            Spacer(Modifier.width((14 * k).dp))
+            Column(Modifier.weight(1f)) {
+                if (ExpFeature.APP_NAME in f) {
+                    Text(
+                        info.appLabel.uppercase(), color = textColor.copy(alpha = if (ExpFeature.ACCENT_TEXT in f) 0.7f else 0.4f), fontSize = (9.5f * k).sp,
+                        fontFamily = font, fontWeight = FontWeight.Medium, letterSpacing = (1.2f * k).sp, maxLines = 1,
+                    )
+                    Spacer(Modifier.height((2 * k).dp))
+                }
+                Text(
+                    info.title, color = textColor, fontSize = (16 * k).sp, fontFamily = font,
+                    fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    info.artist, color = textColor.copy(alpha = 0.55f), fontSize = (13.5f * k).sp, fontFamily = font,
+                    letterSpacing = (0.2f * k).sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                )
+            }
+            if (ExpFeature.VISUALIZER in f || ExpFeature.DOTS in f) {
+                Spacer(Modifier.width((8 * k).dp))
+                Visualizer(info.playing, palette, bars = 7, modifier = Modifier.size(width = (42 * k).dp, height = (24 * k).dp), dots = ExpFeature.DOTS in f)
+            }
+        }
+        Column {
+            Spacer(Modifier.height((18 * k).dp))
+            // A calm white line instead of the colourful bar.
+            Progress(
+                info, listOf(Color.White.copy(alpha = 0.85f)),
+                showTimes = ExpFeature.TIMES in f, seekable = ExpFeature.SEEK in f,
+                onInteract = onInteract, font = font,
+            )
+            Spacer(Modifier.height((6 * k).dp))
+            if (showButtons) Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy((30 * k).dp, Alignment.CenterHorizontally),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                ControlButton(size = (40 * k).dp, onClick = { onInteract(); NowPlaying.previous() }) { PrevIcon((17 * k).dp) }
+                PlayPauseButton(
+                    info, (50 * k).dp, (21 * k).dp,
+                    fill = if (ExpFeature.ACCENT_PLAY in f) songAccent(info, palette) else null,
+                ) { onInteract(); NowPlaying.playPause() }
+                ControlButton(size = (40 * k).dp, onClick = { onInteract(); NowPlaying.next() }) { NextIcon((17 * k).dp) }
+            }
+        }
+    }
 }
 
 /** Looks for the "open Spotify" button that sits in the island's place when nothing plays. */

@@ -19,9 +19,9 @@ and never talks to the network or nearby devices.
 
 ### Clock
 - Centred, iPhone lock-screen style date + time
-- Style presets (Classic, Bold, Thin, Rounded, Serif, Stencil, Dot Matrix, Future…)
+- One Style list with every look: presets (Classic, Bold, Thin, Rounded, Serif, Stencil, Dot
+  Matrix, Future…) plus all 16 fonts (11 bundled fonts and system styles), with a live preview
 - Continuous thickness, size, date size, colour and numeral style
-- 16 font options (11 bundled fonts plus system styles)
 - Battery line under the clock; while charging it alternates the charging speed and time to full
 
 ### Dynamic Island (music)
@@ -30,10 +30,15 @@ and never talks to the network or nearby devices.
 - Three stages — Small → Medium → Large — with smooth morphing between them, and automatic
   shrink-back
 - Per-stage width, height, size, presets, feature toggles and an inward black border
+- Surface looks: black, tinted in the song's colour, or see-through glass
 - Colourful visualiser with colour presets (album colours, rainbow, neon, sunset…), frozen when
-  paused
-- Medium stage extras: play/pause, progress, times, static or dynamic album glow and more
-- Large stage: album art, background blur, seek bar, controls
+  paused, and an optional dot-matrix style with LED-meter motion on any stage
+- Medium stage extras: play/pause, progress, times, static or dynamic album glow, cover wash
+  (blurred album art behind the pill) and more
+- Large stage: album art, background blur, seek bar, controls, a minimal card, accent play
+  button, accent-coloured text and a Contrast option that keeps text readable on any cover
+- Gestures: swipe the island to skip songs, double-tap to play/pause, and optionally hide the
+  buttons
 - Its own font option, with a live preview in Settings
 - When Spotify isn't running, a small Spotify button takes the island's place, with 14
   hand-drawn styles that follow your clock colour and a see-through slider

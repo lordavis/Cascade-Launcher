@@ -83,6 +83,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.foundation.layout.isImeVisible
+import kotlinx.coroutines.flow.first
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
@@ -251,10 +254,12 @@ private fun HomeScreen(act: MainActivity) {
 
     LaunchedEffect(act.returnTick) {
         if (act.returnTick > 0) {
-            act.homeEnter.animateTo(
-                1f,
-                tween(420, easing = androidx.compose.animation.core.CubicBezierEasing(0.05f, 0.7f, 0.1f, 1f)),
-            )
+            // A plain state animation: a newer return simply cancels and restarts it, with no
+            // lock to wait on (the old Animatable could deadlock the main thread here).
+            androidx.compose.animation.core.animate(
+                act.homeEnter, 1f,
+                animationSpec = tween(420, easing = androidx.compose.animation.core.CubicBezierEasing(0.05f, 0.7f, 0.1f, 1f)),
+            ) { v, _ -> act.homeEnter = v }
         }
     }
 
@@ -276,7 +281,7 @@ private fun HomeScreen(act: MainActivity) {
             // zoom up from 92% with a fade) while the system slides the app away. The
             // wallpaper and dim behind stay put.
             .graphicsLayer {
-                val p = act.homeEnter.value
+                val p = act.homeEnter
                 alpha = 0.25f + 0.75f * p
                 val sc = 0.92f + 0.08f * p
                 scaleX = sc
@@ -510,6 +515,8 @@ private fun HomeScreen(act: MainActivity) {
                         if (s.islandExpBorderOn) s.islandExpBorder.dp else 0.dp,
                     ),
                     font = (s.islandFont ?: s.labelFont).family(),
+                    look = s.islandLook,
+                    mode = IslandMode(swipe = s.islandSwipe, hideButtons = s.islandHideButtons),
                     autoShrink = sizingStage == null,
                     onStageChange = { if (sizingStage == null) islandStage = it },
                     onOpenPlayer = {
@@ -824,10 +831,27 @@ private fun AppDrawer(act: MainActivity, onClose: () -> Unit) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
 
-    val close = {
-        keyboard?.hide()
-        focusManager.clearFocus()
-        onClose()
+    // Closing with the keyboard still up used to drop the keyboard, the drawer and the status bar
+    // all in the same instant, which made the system flash a white bar at the top. So, like the
+    // Back button: hide the keyboard first, wait for it to go, then close the drawer.
+    val imeVisible by rememberUpdatedState(WindowInsets.isImeVisible)
+    var closing by remember { mutableStateOf(false) }
+    val close: () -> Unit = {
+        if (!closing) {
+            closing = true
+            val hadKeyboard = imeVisible
+            keyboard?.hide()
+            focusManager.clearFocus()
+            scope.launch {
+                if (hadKeyboard) {
+                    kotlinx.coroutines.withTimeoutOrNull(450) {
+                        androidx.compose.runtime.snapshotFlow { imeVisible }.first { !it }
+                    }
+                }
+                onClose()
+                closing = false
+            }
+        }
     }
 
     val apps = remember(act.allApps, s.hiddenApps) { act.drawerApps }
@@ -864,21 +888,38 @@ private fun AppDrawer(act: MainActivity, onClose: () -> Unit) {
     }
     LaunchedEffect(query) { listState.scrollToItem(0) }
 
-    // Pull down while at the top of the list to close the drawer.
+    // Pull down while at the top of the list: with the keyboard up, the first pull only lowers
+    // the keyboard; the next pull (a new swipe) closes the drawer.
     val closeThreshold = with(LocalDensity.current) { 110.dp.toPx() }
     val pullToClose = remember {
         object : NestedScrollConnection {
             var pulled = 0f
+            /** Set after a pull lowered the keyboard: ignore the rest of that same swipe. */
+            var holdUntilRelease = false
             override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
+                if (holdUntilRelease) return Offset.Zero
                 if (source == NestedScrollSource.UserInput && available.y > 0) {
                     pulled += available.y
-                    if (pulled > closeThreshold) { pulled = 0f; close() }
+                    if (pulled > closeThreshold) {
+                        pulled = 0f
+                        if (imeVisible) {
+                            keyboard?.hide()
+                            focusManager.clearFocus()
+                            holdUntilRelease = true
+                        } else {
+                            close()
+                        }
+                    }
                 } else if (consumed.y != 0f) {
                     pulled = 0f
                 }
                 return Offset.Zero
             }
-            override suspend fun onPreFling(available: Velocity): Velocity { pulled = 0f; return Velocity.Zero }
+            override suspend fun onPreFling(available: Velocity): Velocity {
+                pulled = 0f
+                holdUntilRelease = false
+                return Velocity.Zero
+            }
         }
     }
 

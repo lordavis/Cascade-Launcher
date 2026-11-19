@@ -137,16 +137,25 @@ data class LauncherSettings(
     val pillWideViz: Boolean = false,         // visualizer stretched across the free space
     val pillGlow: Boolean = false,            // static album-colour glow behind the pill
     val pillGlowDynamic: Boolean = false,     // moving, breathing album-colour glow
+    val pillWash: Boolean = false,            // blurred album art behind the pill
+    val pillDots: Boolean = false,            // dot-matrix visualizer
+    val islandLook: IslandLook = IslandLook.BLACK,
+    val islandSwipe: Boolean = false,         // swipe to skip, double-tap to play/pause
+    val islandHideButtons: Boolean = false,   // hide the control buttons (needs islandSwipe)
     val pillFit: Boolean = false,             // shrink to fit the content
     val miniFeatures: Set<MiniFeature> = emptySet(),
     val expFeatures: Set<ExpFeature> = DefaultExpFeatures,
 ) {
     val pillStyle: PillStyle
-        get() = PillStyle(pillSkip, pillTwoLines, pillProgress, pillTime, pillWideViz, pillGlow, pillFit, pillGlowDynamic)
+        get() = PillStyle(
+            pillSkip, pillTwoLines, pillProgress, pillTime, pillWideViz, pillGlow, pillFit, pillGlowDynamic,
+            pillWash, pillDots,
+        )
 
     fun withPillStyle(p: PillStyle) = copy(
         pillSkip = p.skip, pillTwoLines = p.twoLines, pillProgress = p.progress, pillTime = p.time,
         pillWideViz = p.wideViz, pillGlow = p.glow, pillFit = p.fit, pillGlowDynamic = p.glowDynamic,
+        pillWash = p.wash, pillDots = p.dots,
     )
 }
 
@@ -159,6 +168,7 @@ enum class MiniFeature(val label: String) {
     GLOW("Album glow"),
     WIDE_VIZ("Wide visualizer"),
     HIDE_VIZ("No visualizer"),
+    DOTS("Dot matrix bars"),
 }
 
 /** Optional extras for the Large island (full card). */
@@ -171,6 +181,18 @@ enum class ExpFeature(val label: String) {
     VISUALIZER("Visualizer"),
     WIDE_VIZ("Wide visualizer"),
     SEEK("Drag to seek"),
+    MINIMAL("Minimal card"),
+    ACCENT_PLAY("Accent play button"),
+    ACCENT_TEXT("Accent text"),
+    CONTRAST("Contrast"),
+    DOTS("Dot matrix bars"),
+}
+
+/** Surface of the whole island (every stage). */
+enum class IslandLook(val label: String, val blurb: String) {
+    BLACK("Black", "Classic solid black"),
+    TINTED("Tinted", "Near-black in the song's colour"),
+    GLASS("Glass", "See-through with a soft rim"),
 }
 
 val MiniPresets: List<Pair<String, Set<MiniFeature>>> = listOf(
@@ -210,6 +232,8 @@ data class PillStyle(
     val glow: Boolean = false,                // static glow
     val fit: Boolean = false,
     val glowDynamic: Boolean = false,         // flowing + gently pulsing glow
+    val wash: Boolean = false,                // blurred, darkened album art fills the pill
+    val dots: Boolean = false,                // dot-matrix visualizer
 )
 
 /** Ready-made Medium layouts to try. Every extra appears in at least one. */
@@ -223,6 +247,7 @@ val PillPresets: List<Pair<String, PillStyle>> = listOf(
     "Live glow" to PillStyle(glowDynamic = true, twoLines = true, progress = true),
     "Mini player" to PillStyle(fit = true, skip = true, progress = true),
     "Everything" to PillStyle(skip = true, twoLines = true, progress = true, time = true, glow = true),
+    "Cover wash" to PillStyle(wash = true, twoLines = true),
 )
 
 class SettingsStore(context: Context) {
@@ -295,6 +320,11 @@ class SettingsStore(context: Context) {
             pillWideViz = prefs.getBoolean("pillWideViz", d.pillWideViz),
             pillGlow = prefs.getBoolean("pillGlow", d.pillGlow),
             pillGlowDynamic = prefs.getBoolean("pillGlowDynamic", d.pillGlowDynamic),
+            pillWash = prefs.getBoolean("pillWash", d.pillWash),
+            pillDots = prefs.getBoolean("pillDots", d.pillDots),
+            islandSwipe = prefs.getBoolean("islandSwipe", d.islandSwipe),
+            islandHideButtons = prefs.getBoolean("islandHideButtons", d.islandHideButtons),
+            islandLook = enumOr(prefs.getString("islandLook", null), d.islandLook),
             pillFit = prefs.getBoolean("pillFit", d.pillFit),
             islandMiniWidth = prefs.getInt("islandMiniWidth", d.islandMiniWidth),
             islandMiniHeight = prefs.getInt("islandMiniHeight", d.islandMiniHeight),
@@ -371,6 +401,11 @@ class SettingsStore(context: Context) {
         putBoolean("pillWideViz", s.pillWideViz)
         putBoolean("pillGlow", s.pillGlow)
         putBoolean("pillGlowDynamic", s.pillGlowDynamic)
+        putBoolean("pillWash", s.pillWash)
+        putBoolean("pillDots", s.pillDots)
+        putBoolean("islandSwipe", s.islandSwipe)
+        putBoolean("islandHideButtons", s.islandHideButtons)
+        putString("islandLook", s.islandLook.name)
         putBoolean("pillFit", s.pillFit)
         putInt("islandMiniWidth", s.islandMiniWidth)
         putInt("islandMiniHeight", s.islandMiniHeight)

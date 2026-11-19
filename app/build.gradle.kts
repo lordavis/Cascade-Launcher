@@ -13,8 +13,8 @@ android {
         applicationId = "com.cascade.launcher"
         minSdk = 26
         targetSdk = 36
-        versionCode = 35
-        versionName = "1.30"
+        versionCode = 49
+        versionName = "1.44"
     }
 
     buildTypes {

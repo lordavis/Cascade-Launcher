@@ -190,7 +190,7 @@ private fun LazyListScope.clockPage(act: MainActivity) {
         }
         if (!s.clockFont.isVariable) {
             Text(
-                "This font only has a few thicknesses — pick a style above for smooth thickness changes.",
+                "This style only has a few thicknesses, so the slider moves in steps.",
                 color = Muted, fontSize = 12.sp,
                 modifier = Modifier.padding(horizontal = 24.dp),
             )
@@ -201,7 +201,6 @@ private fun LazyListScope.clockPage(act: MainActivity) {
         SliderRow("Date size", s.dateSize, 12..44, "sp", enabled = s.showDate) { v ->
             act.updateSettings { it.copy(dateSize = v) }
         }
-        FontChoiceRow("Font (all fonts)", s.clockFont) { v -> act.updateSettings { it.copy(clockFont = v) } }
 
         Section("Color")
         ClockColorPicker(s.clockColor) { v -> act.updateSettings { it.copy(clockColor = v) } }
@@ -221,44 +220,56 @@ private fun LazyListScope.clockPage(act: MainActivity) {
     }
 }
 
-/** iPhone-style grid of clock looks; each tile is drawn in its own style. */
+/** One entry in the clock Style grid: a ready-made look (font + thickness) or just a font. */
+private data class ClockChoice(val name: String, val font: AppFont, val weight: Int?)
+
+/** Every clock look in one list: the presets first, then the remaining fonts. */
+private val ClockChoices: List<ClockChoice> =
+    ClockPresets.map { ClockChoice(it.name, it.font, it.weight) } +
+        AppFont.entries
+            .filter { f -> ClockPresets.none { it.font == f } }
+            .map { ClockChoice(if (it == AppFont.SERIF) "System serif" else it.label.substringBefore(" ("), it, null) }
+
+/** Clock styles as simple text tiles; the pinned preview above shows the real clock. */
 @Composable
 private fun ClockStyleGrid(act: MainActivity) {
     val s = act.settings
     val accent = LocalAccent.current
-    val sample = remember {
-        java.time.LocalTime.now().format(java.time.format.DateTimeFormatter.ofPattern("h:mm"))
-    }
+    // A font-only tile is selected when no preset matches the current font + thickness.
+    val presetMatch = ClockPresets.any { it.font == s.clockFont && it.weight == s.clockWeight }
     Column(Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
-        ClockPresets.chunked(3).forEach { row ->
+        ClockChoices.chunked(3).forEach { row ->
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                row.forEach { p ->
-                    val selected = s.clockFont == p.font && s.clockWeight == p.weight
-                    Column(
+                row.forEach { c ->
+                    val selected = if (c.weight != null) s.clockFont == c.font && s.clockWeight == c.weight
+                    else s.clockFont == c.font && !presetMatch
+                    Box(
                         Modifier
                             .weight(1f)
                             .padding(vertical = 4.dp)
-                            .clip(RoundedCornerShape(16.dp))
-                            .background(
-                                androidx.compose.ui.graphics.Brush.verticalGradient(
-                                    listOf(Color(0xFF2B2A5C), Color(0xFF15142E)),
-                                ),
-                            )
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(Color.White.copy(alpha = if (selected) 0.12f else 0.05f))
                             .border(
-                                if (selected) 2.dp else 0.dp,
-                                if (selected) accent else Color.Transparent,
-                                RoundedCornerShape(16.dp),
+                                if (selected) 2.dp else 1.dp,
+                                if (selected) accent else Color.White.copy(alpha = 0.08f),
+                                RoundedCornerShape(14.dp),
                             )
-                            .clickable { act.updateSettings { it.copy(clockFont = p.font, clockWeight = p.weight) } }
-                            .padding(vertical = 12.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
+                            .clickable {
+                                act.updateSettings {
+                                    if (c.weight != null) it.copy(clockFont = c.font, clockWeight = c.weight)
+                                    else it.copy(clockFont = c.font)
+                                }
+                            }
+                            .padding(vertical = 14.dp, horizontal = 6.dp),
+                        contentAlignment = Alignment.Center,
                     ) {
-                        ClockTimeText(s, sample, sizeSp = 34f, font = p.font, weight = p.weight)
                         Text(
-                            p.name,
-                            color = if (selected) accent else Color.White.copy(alpha = 0.7f),
-                            fontSize = 12.sp,
+                            c.name,
+                            color = if (selected) accent else Color.White.copy(alpha = 0.85f),
+                            fontSize = 14.sp,
                             fontWeight = FontWeight.Medium,
+                            maxLines = 1,
+                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                         )
                     }
                 }
@@ -492,7 +503,7 @@ private fun LazyListScope.islandPage(act: MainActivity) {
     val s = act.settings
     // Pinned while you change colours and fonts; the Spotify button preview takes over further down.
     stickyHeader {
-        Box(Modifier.background(Bg)) { IslandPreview(s.islandVisualizer, (s.islandFont ?: s.labelFont).family()) }
+        Box(Modifier.background(Bg)) { IslandPreview(s.islandVisualizer, (s.islandFont ?: s.labelFont).family(), s.islandLook) }
     }
     item {
         // Reading resumeTick re-checks the permission every time you come back from system settings.
@@ -522,6 +533,51 @@ private fun LazyListScope.islandPage(act: MainActivity) {
             )
             ActionRow("Open Cascade app info") { act.openOwnAppInfo() }
         }
+
+        Section("Look")
+        Text(
+            "The island's surface, on every stage.",
+            color = Muted, fontSize = 13.sp,
+            modifier = Modifier.padding(horizontal = 24.dp),
+        )
+        Row(
+            Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            val accent = LocalAccent.current
+            IslandLook.entries.forEach { lk ->
+                val sel = lk == s.islandLook
+                Column(
+                    Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(Color.White.copy(alpha = if (sel) 0.12f else 0.05f))
+                        .border(
+                            if (sel) 2.dp else 1.dp,
+                            if (sel) accent else Color.White.copy(alpha = 0.08f),
+                            RoundedCornerShape(14.dp),
+                        )
+                        .clickable { act.updateSettings { it.copy(islandLook = lk) } }
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                ) {
+                    Text(lk.label, color = if (sel) accent else Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                    Text(lk.blurb, color = Muted, fontSize = 11.sp, lineHeight = 14.sp)
+                }
+            }
+        }
+
+        Section("Gestures")
+        SwitchRow(
+            "Swipe to skip",
+            s.islandSwipe,
+            subtitle = "Swipe left on the island for the next song, right for the previous one. Double-tap to play or pause",
+        ) { v -> act.updateSettings { it.copy(islandSwipe = v) } }
+        SwitchRow(
+            "Hide buttons",
+            s.islandHideButtons,
+            subtitle = "A cleaner island with no play or skip buttons; use the gestures instead",
+            enabled = s.islandSwipe,
+        ) { v -> act.updateSettings { it.copy(islandHideButtons = v) } }
 
         Section("Visualizer colors")
         Text(
@@ -646,7 +702,11 @@ private fun PermissionRow(title: String, granted: Boolean, why: String, onClick:
     }
 
 @Composable
-private fun IslandPreview(style: VisualizerStyle, font: androidx.compose.ui.text.font.FontFamily) {
+private fun IslandPreview(
+    style: VisualizerStyle,
+    font: androidx.compose.ui.text.font.FontFamily,
+    look: IslandLook,
+) {
     val accent = LocalAccent.current
     val palette = remember(style, accent) { visualizerPalette(style, emptyList(), accent) }
     Box(
@@ -663,7 +723,17 @@ private fun IslandPreview(style: VisualizerStyle, font: androidx.compose.ui.text
                 .width(250.dp)
                 .height(48.dp)
                 .clip(RoundedCornerShape(50))
-                .background(Color.Black)
+                .background(
+                    when (look) {
+                        IslandLook.BLACK -> Color.Black
+                        IslandLook.TINTED -> androidx.compose.ui.graphics.lerp(Color.Black, palette.first(), 0.17f)
+                        IslandLook.GLASS -> Color.Black.copy(alpha = 0.42f)
+                    },
+                )
+                .then(
+                    if (look == IslandLook.GLASS) Modifier.border(1.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape(50))
+                    else Modifier,
+                )
                 .padding(horizontal = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {

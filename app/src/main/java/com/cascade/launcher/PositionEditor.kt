@@ -561,6 +561,8 @@ private fun PillLayoutPicker(act: MainActivity) {
         Triple("Glow: static", current.glow) { v -> current.copy(glow = v, glowDynamic = if (v) false else current.glowDynamic) },
         Triple("Glow: dynamic", current.glowDynamic) { v -> current.copy(glowDynamic = v, glow = if (v) false else current.glow) },
         Triple("Fit to content", current.fit) { v -> current.copy(fit = v) },
+        Triple("Cover wash", current.wash) { v -> current.copy(wash = v) },
+        Triple("Dot matrix bars", current.dots) { v -> current.copy(dots = v) },
     )
     toggles.chunked(2).forEach { pair ->
         Row(Modifier.fillMaxWidth()) {
